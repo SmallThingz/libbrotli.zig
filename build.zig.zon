@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0-dev.2984+cb7d2b056",
     .dependencies = .{
         .brotli_upstream = .{
-            .url = "https://github.com/google/brotli/archive/refs/tags/v1.1.0.tar.gz",
-            .hash = "N-V-__8AAF_gIQDX2wVzXI-r96NyCgKuDj9W_Gab-TU7Qzoi",
+            .url = "git+https://github.com/google/brotli?ref=master#ed738e842d2fbdf2d6459e39267a633c4a9b2f5d",
+            .hash = "N-V-__8AAIgn4APR8Smd_123K4liHh5-u1Vsg83sw_j1xS4Q",
         },
         .ziglibc = .{
             .url = "https://github.com/SmallThingz/ziglibc/archive/f7498cf373a9fe67787664f6917bf15df2f68aeb.tar.gz",
