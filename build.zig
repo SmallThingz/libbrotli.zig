@@ -82,7 +82,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(lib);
 
     const mod = b.addModule("libbrotli", .{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/brotli.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = !static_libc,
