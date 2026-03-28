@@ -5,11 +5,11 @@
     .minimum_zig_version = "0.16.0-dev.2984+cb7d2b056",
     .dependencies = .{
         .brotli_upstream = .{
-            .url = "git+https://github.com/facebook/zstd#v1.2.0",
-            .hash = "N-V-__8AACd9RABGVt9KjWZ9t_R-_FHEWansToLvyrdlTZ_W",
+            .url = "git+https://github.com/google/brotli#v1.2.0",
+            .hash = "N-V-__8AAMNh8QMyXlG5iuyWDZmjiXB40JarUNu1a80peP7K",
         },
         .ziglibc = .{
-            .url = "https://github.com/SmallThingz/ziglibc/archive/f7498cf373a9fe67787664f6917bf15df2f68aeb.tar.gz",
+            .url = "git+https://github.com/SmallThingz/ziglibc#f7498cf373a9fe67787664f6917bf15df2f68aeb",
             .hash = "N-V-__8AAOg8CgBsWJ9s3O7sKDdMR56qqkTUlWl4nZjhXq5Z",
             .lazy = true,
         },
