@@ -1,7 +1,0 @@
-.zig-cache/
-zig-out/
-/dep/*
-!/dep/libc-test
-!/dep/tiny-regex-c
-!/dep/open_posix_testsuite
-!/dep/glibc-testsuite

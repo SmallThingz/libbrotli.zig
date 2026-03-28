@@ -1,156 +1,207 @@
 const std = @import("std");
 
-// Although this function looks imperative, it does not perform the build
-// directly and instead it mutates the build graph (`b`) that will be then
-// executed by an external runner. The functions in `std.Build` implement a DSL
-// for defining build steps and express dependencies between them, allowing the
-// build runner to parallelize the build automatically (and the cache system to
-// know when a step doesn't need to be re-run).
+const brotli_version = std.SemanticVersion{
+    .major = 1,
+    .minor = 1,
+    .patch = 0,
+};
+
+const brotli_common_sources = [_][]const u8{
+    "c/common/constants.c",
+    "c/common/context.c",
+    "c/common/dictionary.c",
+    "c/common/platform.c",
+    "c/common/shared_dictionary.c",
+    "c/common/transform.c",
+};
+
+const brotli_enc_sources = [_][]const u8{
+    "c/enc/backward_references.c",
+    "c/enc/backward_references_hq.c",
+    "c/enc/bit_cost.c",
+    "c/enc/block_splitter.c",
+    "c/enc/brotli_bit_stream.c",
+    "c/enc/cluster.c",
+    "c/enc/command.c",
+    "c/enc/compound_dictionary.c",
+    "c/enc/compress_fragment.c",
+    "c/enc/compress_fragment_two_pass.c",
+    "c/enc/dictionary_hash.c",
+    "c/enc/encode.c",
+    "c/enc/encoder_dict.c",
+    "c/enc/entropy_encode.c",
+    "c/enc/fast_log.c",
+    "c/enc/histogram.c",
+    "c/enc/literal_cost.c",
+    "c/enc/memory.c",
+    "c/enc/metablock.c",
+    "c/enc/static_dict.c",
+    "c/enc/utf8_util.c",
+};
+
+const brotli_dec_sources = [_][]const u8{
+    "c/dec/bit_reader.c",
+    "c/dec/decode.c",
+    "c/dec/huffman.c",
+    "c/dec/state.c",
+};
+
 pub fn build(b: *std.Build) void {
-    // Standard target options allow the person running `zig build` to choose
-    // what target to build for. Here we do not override the defaults, which
-    // means any target is allowed, and the default is native. Other options
-    // for restricting supported target set are available.
     const target = b.standardTargetOptions(.{});
-    // Standard optimization options allow the person running `zig build` to select
-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
-    // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
-    // It's also possible to define more custom flags to toggle optional features
-    // of this build script using `b.option()`. All defined flags (including
-    // target and optimize options) will be listed when running `zig build --help`
-    // in this directory.
+    const shared = b.option(bool, "shared", "Build libbrotli as a shared library") orelse false;
+    const static_libc = b.option(bool, "static_libc", "Link against static ziglibc instead of system libc") orelse true;
 
-    // This creates a module, which represents a collection of source files alongside
-    // some compilation options, such as optimization mode and linked system libraries.
-    // Zig modules are the preferred way of making Zig code available to consumers.
-    // addModule defines a module that we intend to make available for importing
-    // to our consumers. We must give it a name because a Zig package can expose
-    // multiple modules and consumers will need to be able to specify which
-    // module they want to access.
-    const mod = b.addModule("libbrotli_zig", .{
-        // The root source file is the "entry point" of this module. Users of
-        // this module will only be able to access public declarations contained
-        // in this file, which means that if you have declarations that you
-        // intend to expose to consumers that were defined in other files part
-        // of this module, you will have to make sure to re-export them from
-        // the root file.
-        .root_source_file = b.path("src/root.zig"),
-        // Later on we'll use this module as the root module of a test executable
-        // which requires us to specify a target.
-        .target = target,
-    });
+    const brotli_upstream = b.dependency("brotli_upstream", .{});
 
-    // Here we define an executable. An executable needs to have a root module
-    // which needs to expose a `main` function. While we could add a main function
-    // to the module defined above, it's sometimes preferable to split business
-    // logic and the CLI into two separate modules.
-    //
-    // If your goal is to create a Zig library for others to use, consider if
-    // it might benefit from also exposing a CLI tool. A parser library for a
-    // data serialization format could also bundle a CLI syntax checker, for example.
-    //
-    // If instead your goal is to create an executable, consider if users might
-    // be interested in also being able to embed the core functionality of your
-    // program in their own executable in order to avoid the overhead involved in
-    // subprocessing your CLI tool.
-    //
-    // If neither case applies to you, feel free to delete the declaration you
-    // don't need and to put everything under a single module.
-    const exe = b.addExecutable(.{
-        .name = "libbrotli_zig",
+    const lib = b.addLibrary(.{
+        .name = "brotli",
+        .linkage = if (shared) .dynamic else .static,
+        .version = brotli_version,
         .root_module = b.createModule(.{
-            // b.createModule defines a new module just like b.addModule but,
-            // unlike b.addModule, it does not expose the module to consumers of
-            // this package, which is why in this case we don't have to give it a name.
-            .root_source_file = b.path("src/main.zig"),
-            // Target and optimization levels must be explicitly wired in when
-            // defining an executable or library (in the root module), and you
-            // can also hardcode a specific target for an executable or library
-            // definition if desireable (e.g. firmware for embedded devices).
             .target = target,
             .optimize = optimize,
-            // List of modules available for import in source files part of the
-            // root module.
-            .imports = &.{
-                // Here "libbrotli_zig" is the name you will use in your source code to
-                // import this module (e.g. `@import("libbrotli_zig")`). The name is
-                // repeated because you are allowed to rename your imports, which
-                // can be extremely useful in case of collisions (which can happen
-                // importing modules from different packages).
-                .{ .name = "libbrotli_zig", .module = mod },
-            },
+            .link_libc = !static_libc,
+            .sanitize_c = .off,
         }),
     });
+    configureBrotliLibrary(lib.root_module, brotli_upstream);
 
-    // This declares intent for the executable to be installed into the
-    // install prefix when running `zig build` (i.e. when executing the default
-    // step). By default the install prefix is `zig-out/` but can be overridden
-    // by passing `--prefix` or `-p`.
-    b.installArtifact(exe);
+    const static_libc_artifact = if (static_libc) blk: {
+        const ziglibc_dep = b.lazyDependency("ziglibc", .{
+            .target = target,
+            .optimize = optimize,
+            .trace = false,
+        }) orelse return;
 
-    // This creates a top level step. Top level steps have a name and can be
-    // invoked by name when running `zig build` (e.g. `zig build run`).
-    // This will evaluate the `run` step rather than the default step.
-    // For a top level step to actually do something, it must depend on other
-    // steps (e.g. a Run step, as we will see in a moment).
-    const run_step = b.step("run", "Run the app");
+        const ziglibc_lib = findDependencyArtifactByLinkage(ziglibc_dep, "cguana", .static);
+        configureStaticLibc(lib.root_module, ziglibc_lib, ziglibc_dep);
+        break :blk ziglibc_lib;
+    } else null;
 
-    // This creates a RunArtifact step in the build graph. A RunArtifact step
-    // invokes an executable compiled by Zig. Steps will only be executed by the
-    // runner if invoked directly by the user (in the case of top level steps)
-    // or if another step depends on it, so it's up to you to define when and
-    // how this Run step will be executed. In our case we want to run it when
-    // the user runs `zig build run`, so we create a dependency link.
-    const run_cmd = b.addRunArtifact(exe);
-    run_step.dependOn(&run_cmd.step);
+    b.installArtifact(lib);
 
-    // By making the run step depend on the default step, it will be run from the
-    // installation directory rather than directly from within the cache directory.
-    run_cmd.step.dependOn(b.getInstallStep());
-
-    // This allows the user to pass arguments to the application in the build
-    // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
+    const mod = b.addModule("libbrotli", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = !static_libc,
+    });
+    mod.addIncludePath(brotli_upstream.path("c/include"));
+    mod.addIncludePath(brotli_upstream.path("c"));
+    mod.linkLibrary(lib);
+    if (static_libc_artifact) |artifact| {
+        const ziglibc_dep = b.lazyDependency("ziglibc", .{
+            .target = target,
+            .optimize = optimize,
+            .trace = false,
+        }) orelse return;
+        configureStaticLibc(mod, artifact, ziglibc_dep);
     }
 
-    // Creates an executable that will run `test` blocks from the provided module.
-    // Here `mod` needs to define a target, which is why earlier we made sure to
-    // set the releative field.
-    const mod_tests = b.addTest(.{
-        .root_module = mod,
+    const tests = b.addTest(.{
+        .root_module = b.addModule("libbrotli_tests", .{
+            .root_source_file = b.path("test/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = !static_libc,
+        }),
     });
+    tests.root_module.addImport("libbrotli", mod);
+    if (static_libc_artifact) |artifact| {
+        const ziglibc_dep = b.lazyDependency("ziglibc", .{
+            .target = target,
+            .optimize = optimize,
+            .trace = false,
+        }) orelse return;
+        configureStaticLibc(tests.root_module, artifact, ziglibc_dep);
+    }
+    const run_tests = b.addRunArtifact(tests);
+    const test_step = b.step("test", "Run library tests");
+    test_step.dependOn(&run_tests.step);
 
-    // A run step that will run the test executable.
-    const run_mod_tests = b.addRunArtifact(mod_tests);
-
-    // Creates an executable that will run `test` blocks from the executable's
-    // root module. Note that test executables only test one module at a time,
-    // hence why we have to create two separate ones.
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
+    const example = b.addExecutable(.{
+        .name = "brotli-roundtrip",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/brotli_roundtrip.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = !static_libc,
+        }),
     });
+    example.root_module.addImport("libbrotli", mod);
+    if (static_libc_artifact) |artifact| {
+        const ziglibc_dep = b.lazyDependency("ziglibc", .{
+            .target = target,
+            .optimize = optimize,
+            .trace = false,
+        }) orelse return;
+        configureStaticLibc(example.root_module, artifact, ziglibc_dep);
+    }
+    b.installArtifact(example);
 
-    // A run step that will run the second test executable.
-    const run_exe_tests = b.addRunArtifact(exe_tests);
+    const run_example = b.addRunArtifact(example);
+    const example_step = b.step("example", "Run brotli roundtrip example");
+    example_step.dependOn(&run_example.step);
 
-    // A top level step for running all tests. dependOn can be called multiple
-    // times and since the two run steps do not depend on one another, this will
-    // make the two of them run in parallel.
-    const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
+    const check = b.step("check", "Compile library, tests and example without running");
+    check.dependOn(&lib.step);
+    check.dependOn(&tests.step);
+    check.dependOn(&example.step);
+}
 
-    // Just like flags, top level steps are also listed in the `--help` menu.
-    //
-    // The Zig build system is entirely implemented in userland, which means
-    // that it cannot hook into private compiler APIs. All compilation work
-    // orchestrated by the build system will result in other Zig compiler
-    // subcommands being invoked with the right flags defined. You can observe
-    // these invocations when one fails (or you pass a flag to increase
-    // verbosity) to validate assumptions and diagnose problems.
-    //
-    // Lastly, the Zig build system is relatively simple and self-contained,
-    // and reading its source code will allow you to master it.
+fn configureBrotliLibrary(module: *std.Build.Module, dep: *std.Build.Dependency) void {
+    module.addIncludePath(.{ .cwd_relative = "include" });
+    module.addIncludePath(dep.path("c/include"));
+    module.addIncludePath(dep.path("c"));
+
+    module.addCSourceFiles(.{
+        .root = dep.path(""),
+        .files = &brotli_common_sources,
+        .flags = &.{"-std=c99"},
+    });
+    module.addCSourceFiles(.{
+        .root = dep.path(""),
+        .files = &brotli_enc_sources,
+        .flags = &.{"-std=c99"},
+    });
+    module.addCSourceFiles(.{
+        .root = dep.path(""),
+        .files = &brotli_dec_sources,
+        .flags = &.{"-std=c99"},
+    });
+}
+
+fn configureStaticLibc(module: *std.Build.Module, artifact: *std.Build.Step.Compile, dep: *std.Build.Dependency) void {
+    module.addIncludePath(dep.path("inc/libc"));
+    module.addIncludePath(dep.path("inc/posix"));
+    module.addIncludePath(dep.path("inc/gnu"));
+    module.linkLibrary(artifact);
+}
+
+fn findDependencyArtifactByLinkage(
+    dep: *std.Build.Dependency,
+    name: []const u8,
+    linkage: std.builtin.LinkMode,
+) *std.Build.Step.Compile {
+    var found: ?*std.Build.Step.Compile = null;
+    for (dep.builder.install_tls.step.dependencies.items) |dep_step| {
+        const install_artifact = dep_step.cast(std.Build.Step.InstallArtifact) orelse continue;
+        if (!std.mem.eql(u8, install_artifact.artifact.name, name)) continue;
+        if (install_artifact.artifact.linkage != linkage) continue;
+
+        if (found != null) {
+            std.debug.panic(
+                "artifact '{s}' with linkage '{s}' is ambiguous in dependency",
+                .{ name, @tagName(linkage) },
+            );
+        }
+        found = install_artifact.artifact;
+    }
+
+    if (found) |artifact| return artifact;
+    std.debug.panic(
+        "unable to find artifact '{s}' with linkage '{s}' in dependency install graph",
+        .{ name, @tagName(linkage) },
+    );
 }
