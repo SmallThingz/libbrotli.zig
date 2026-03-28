@@ -35,6 +35,8 @@ const brotli_enc_sources = [_][]const u8{
     "c/enc/literal_cost.c",
     "c/enc/memory.c",
     "c/enc/metablock.c",
+    "c/enc/static_dict_lut.c",
+    "c/enc/static_init.c",
     "c/enc/static_dict.c",
     "c/enc/utf8_util.c",
 };
@@ -43,7 +45,9 @@ const brotli_dec_sources = [_][]const u8{
     "c/dec/bit_reader.c",
     "c/dec/decode.c",
     "c/dec/huffman.c",
+    "c/dec/prefix.c",
     "c/dec/state.c",
+    "c/dec/static_init.c",
 };
 
 pub fn build(b: *std.Build) void {
@@ -67,15 +71,15 @@ pub fn build(b: *std.Build) void {
     });
     configureBrotliLibrary(lib.root_module, brotli_upstream);
 
-    const static_libc_artifact = if (static_libc) blk: {
-        const ziglibc_dep = b.lazyDependency("ziglibc", .{
-            .target = target,
-            .optimize = optimize,
-            .trace = false,
-        }) orelse return;
+    const ziglibc_dep = if (static_libc) b.dependency("ziglibc", .{
+        .target = target,
+        .optimize = optimize,
+        .trace = false,
+    }) else null;
 
-        const ziglibc_lib = findDependencyArtifactByLinkage(ziglibc_dep, "cguana", .static);
-        configureStaticLibc(lib.root_module, ziglibc_lib, ziglibc_dep);
+    const static_libc_artifact = if (ziglibc_dep) |dep| blk: {
+        const ziglibc_lib = findDependencyArtifactByLinkage(dep, "cguana", .static);
+        configureStaticLibc(lib.root_module, ziglibc_lib, dep);
         break :blk ziglibc_lib;
     } else null;
 
@@ -91,12 +95,7 @@ pub fn build(b: *std.Build) void {
     mod.addIncludePath(brotli_upstream.path("c"));
     mod.linkLibrary(lib);
     if (static_libc_artifact) |artifact| {
-        const ziglibc_dep = b.lazyDependency("ziglibc", .{
-            .target = target,
-            .optimize = optimize,
-            .trace = false,
-        }) orelse return;
-        configureStaticLibc(mod, artifact, ziglibc_dep);
+        configureStaticLibc(mod, artifact, ziglibc_dep.?);
     }
 
     const tests = b.addTest(.{
@@ -109,12 +108,7 @@ pub fn build(b: *std.Build) void {
     });
     tests.root_module.addImport("libbrotli", mod);
     if (static_libc_artifact) |artifact| {
-        const ziglibc_dep = b.lazyDependency("ziglibc", .{
-            .target = target,
-            .optimize = optimize,
-            .trace = false,
-        }) orelse return;
-        configureStaticLibc(tests.root_module, artifact, ziglibc_dep);
+        configureStaticLibc(tests.root_module, artifact, ziglibc_dep.?);
     }
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run library tests");
@@ -131,12 +125,7 @@ pub fn build(b: *std.Build) void {
     });
     example.root_module.addImport("libbrotli", mod);
     if (static_libc_artifact) |artifact| {
-        const ziglibc_dep = b.lazyDependency("ziglibc", .{
-            .target = target,
-            .optimize = optimize,
-            .trace = false,
-        }) orelse return;
-        configureStaticLibc(example.root_module, artifact, ziglibc_dep);
+        configureStaticLibc(example.root_module, artifact, ziglibc_dep.?);
     }
     b.installArtifact(example);
 
