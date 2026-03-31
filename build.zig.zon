@@ -9,8 +9,8 @@
             .hash = "N-V-__8AAMNh8QMyXlG5iuyWDZmjiXB40JarUNu1a80peP7K",
         },
         .ziglibc = .{
-            .url = "git+https://github.com/SmallThingz/ziglibc#f7498cf373a9fe67787664f6917bf15df2f68aeb",
-            .hash = "N-V-__8AAOg8CgBsWJ9s3O7sKDdMR56qqkTUlWl4nZjhXq5Z",
+            .url = "git+https://github.com/SmallThingz/ziglibc#b6e1db3968cfc71f740c95b9308378137df4f0f0",
+            .hash = "N-V-__8AAAdgCgBOOTMNno4yXYcXyIVt9jp8J6OFyJ3UP-sL",
         },
     },
     .paths = .{
