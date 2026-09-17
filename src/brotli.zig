@@ -1,4 +1,5 @@
 const std = @import("std");
+const Memory = @import("memory.zig").Memory;
 const raw = @import("brotli_raw.zig").c;
 
 /// Full raw `libbrotli` C API exposed via `@cImport`.
@@ -9,7 +10,8 @@ pub const default_quality: i32 = raw.BROTLI_DEFAULT_QUALITY;
 /// Default brotli window used by `compressDefault`.
 pub const default_window: i32 = raw.BROTLI_DEFAULT_WINDOW;
 /// Default brotli mode used by `compressDefault`.
-pub const default_mode: raw.BrotliEncoderMode = raw.BROTLI_DEFAULT_MODE;
+pub const Mode = enum(u32) { generic = 0, text = 1, font = 2 };
+pub const default_mode: Mode = .generic;
 
 /// Default input chunk size used by stream helpers.
 pub const default_stream_in_buffer_size: usize = 64 * 1024;
@@ -31,13 +33,15 @@ pub const EncoderOptions = struct {
     /// Window size parameter (`10`..`24`).
     window: i32 = default_window,
     /// Compression mode (`generic`, `text`, `font`).
-    mode: raw.BrotliEncoderMode = default_mode,
+    mode: Mode = default_mode,
     /// Stream buffer sizing options.
     stream: StreamOptions = .{},
 };
 
 /// Streaming decoder options.
 pub const DecoderOptions = struct {
+    /// Maximum total decoded bytes. Enforced before writing each output chunk.
+    max_output_size: usize = std.math.maxInt(usize),
     /// Enables "large window brotli" decoder mode.
     large_window: bool = false,
     /// Disables dynamic ring-buffer resizing.
@@ -61,13 +65,15 @@ pub const CompressOptions = struct {
     /// Window size parameter (`10`..`24`).
     window: i32 = default_window,
     /// Compression mode (`generic`, `text`, `font`).
-    mode: raw.BrotliEncoderMode = raw.BROTLI_DEFAULT_MODE,
+    mode: Mode = default_mode,
 };
 
 /// Streaming brotli encoder that writes compressed bytes to a `std.Io.Writer`.
 pub const Encoder = struct {
     allocator: std.mem.Allocator,
     state: *raw.BrotliEncoderState,
+    memory: *Memory,
+    failed: bool = false,
     in_buffer: []u8,
     out_buffer: []u8,
 
@@ -77,7 +83,9 @@ pub const Encoder = struct {
             return error.InvalidBufferSize;
         }
 
-        const state = raw.BrotliEncoderCreateInstance(null, null, null) orelse return error.OutOfMemory;
+        const memory = try Memory.create(allocator);
+        errdefer memory.destroy();
+        const state = raw.BrotliEncoderCreateInstance(Memory.alloc, Memory.free, memory) orelse return error.OutOfMemory;
         errdefer raw.BrotliEncoderDestroyInstance(state);
 
         const in_buffer = try allocator.alloc(u8, options.stream.in_buffer_size);
@@ -88,14 +96,15 @@ pub const Encoder = struct {
         var self = Encoder{
             .allocator = allocator,
             .state = state,
+            .memory = memory,
             .in_buffer = in_buffer,
             .out_buffer = out_buffer,
         };
-        errdefer self.deinit();
 
+        try validateOptions(options.quality, options.window);
         try self.setParameter(raw.BROTLI_PARAM_QUALITY, try toU32Checked(options.quality));
         try self.setParameter(raw.BROTLI_PARAM_LGWIN, try toU32Checked(options.window));
-        try self.setParameter(raw.BROTLI_PARAM_MODE, @intCast(options.mode));
+        try self.setParameter(raw.BROTLI_PARAM_MODE, @intFromEnum(options.mode));
 
         return self;
     }
@@ -105,6 +114,8 @@ pub const Encoder = struct {
         self.allocator.free(self.in_buffer);
         self.allocator.free(self.out_buffer);
         raw.BrotliEncoderDestroyInstance(self.state);
+        self.memory.destroy();
+        self.* = undefined;
     }
 
     /// Sets an encoder parameter on the underlying stream state.
@@ -113,10 +124,15 @@ pub const Encoder = struct {
         if (ok == raw.BROTLI_FALSE) return error.InvalidParameter;
     }
 
-    /// Attaches a prepared dictionary to the encoder state.
+    /// Attach an owned dictionary by reference; it must outlive this encoder.
+    pub fn useDictionary(self: *Encoder, dictionary: *const PreparedDictionary) !void {
+        try self.attachPreparedDictionary(dictionary.handle);
+    }
+
+    /// Attaches a borrowed prepared dictionary; it must outlive the encoder.
     pub fn attachPreparedDictionary(self: *Encoder, dictionary: *const raw.BrotliEncoderPreparedDictionary) !void {
         const ok = raw.BrotliEncoderAttachPreparedDictionary(self.state, dictionary);
-        if (ok == raw.BROTLI_FALSE) return error.InvalidDictionary;
+        if (ok == raw.BROTLI_FALSE) return if (self.memory.failed) error.OutOfMemory else error.InvalidDictionary;
     }
 
     /// Returns `true` when the stream has produced all final output.
@@ -169,6 +185,9 @@ pub const Encoder = struct {
         op: raw.BrotliEncoderOperation,
         writer: *std.Io.Writer,
     ) !void {
+        if (self.failed) return error.InvalidState;
+        if (self.isFinished()) return error.StreamFinished;
+        errdefer self.failed = true;
         var available_in: usize = input.len;
         var next_in: [*c]const u8 = if (input.len == 0) null else @ptrCast(input.ptr);
 
@@ -187,7 +206,7 @@ pub const Encoder = struct {
                 &next_out,
                 null,
             );
-            if (ok == raw.BROTLI_FALSE) return error.CompressionFailed;
+            if (ok == raw.BROTLI_FALSE) return if (self.memory.failed) error.OutOfMemory else error.CompressionFailed;
 
             const produced = self.out_buffer.len - available_out;
             if (produced != 0) try writer.writeAll(self.out_buffer[0..produced]);
@@ -205,6 +224,11 @@ pub const Encoder = struct {
 pub const Decoder = struct {
     allocator: std.mem.Allocator,
     state: *raw.BrotliDecoderState,
+    memory: *Memory,
+    failed: bool = false,
+    total_output: usize = 0,
+    max_output_size: usize,
+    dictionaries: std.ArrayList([]u8) = .empty,
     in_buffer: []u8,
     out_buffer: []u8,
 
@@ -214,7 +238,9 @@ pub const Decoder = struct {
             return error.InvalidBufferSize;
         }
 
-        const state = raw.BrotliDecoderCreateInstance(null, null, null) orelse return error.OutOfMemory;
+        const memory = try Memory.create(allocator);
+        errdefer memory.destroy();
+        const state = raw.BrotliDecoderCreateInstance(Memory.alloc, Memory.free, memory) orelse return error.OutOfMemory;
         errdefer raw.BrotliDecoderDestroyInstance(state);
 
         const in_buffer = try allocator.alloc(u8, options.stream.in_buffer_size);
@@ -224,11 +250,12 @@ pub const Decoder = struct {
 
         var self = Decoder{
             .allocator = allocator,
+            .max_output_size = options.max_output_size,
             .state = state,
+            .memory = memory,
             .in_buffer = in_buffer,
             .out_buffer = out_buffer,
         };
-        errdefer self.deinit();
 
         if (options.large_window) {
             try self.setParameter(raw.BROTLI_DECODER_PARAM_LARGE_WINDOW, 1);
@@ -245,6 +272,10 @@ pub const Decoder = struct {
         self.allocator.free(self.in_buffer);
         self.allocator.free(self.out_buffer);
         raw.BrotliDecoderDestroyInstance(self.state);
+        for (self.dictionaries.items) |bytes| self.allocator.free(bytes);
+        self.dictionaries.deinit(self.allocator);
+        self.memory.destroy();
+        self.* = undefined;
     }
 
     /// Sets a decoder parameter on the underlying state.
@@ -253,7 +284,16 @@ pub const Decoder = struct {
         if (ok == raw.BROTLI_FALSE) return error.InvalidParameter;
     }
 
-    /// Attaches a shared dictionary to the decoder.
+    /// Copies a prefix dictionary into this decoder; caller bytes can be freed.
+    pub fn loadDictionary(self: *Decoder, bytes: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, bytes);
+        errdefer self.allocator.free(owned);
+        try self.dictionaries.ensureUnusedCapacity(self.allocator, 1);
+        try self.attachDictionary(raw.BROTLI_SHARED_DICTIONARY_RAW, owned);
+        self.dictionaries.appendAssumeCapacity(owned);
+    }
+
+    /// Attaches a borrowed shared dictionary. Bytes must outlive this decoder.
     pub fn attachDictionary(
         self: *Decoder,
         dict_type: raw.BrotliSharedDictionaryType,
@@ -265,7 +305,7 @@ pub const Decoder = struct {
             dictionary.len,
             if (dictionary.len == 0) null else @ptrCast(dictionary.ptr),
         );
-        if (ok == raw.BROTLI_FALSE) return error.InvalidDictionary;
+        if (ok == raw.BROTLI_FALSE) return if (self.memory.failed) error.OutOfMemory else error.InvalidDictionary;
     }
 
     /// Returns `true` when stream reached final state.
@@ -280,6 +320,8 @@ pub const Decoder = struct {
 
     /// Decodes one chunk and writes produced output.
     pub fn update(self: *Decoder, input: []const u8, writer: *std.Io.Writer) !DecodeStatus {
+        if (self.failed) return error.InvalidState;
+        errdefer self.failed = true;
         var available_in: usize = input.len;
         var next_in: [*c]const u8 = if (input.len == 0) null else @ptrCast(input.ptr);
 
@@ -297,7 +339,9 @@ pub const Decoder = struct {
             );
 
             const produced = self.out_buffer.len - available_out;
+            if (produced > self.max_output_size - self.total_output) return error.OutputTooLarge;
             if (produced != 0) try writer.writeAll(self.out_buffer[0..produced]);
+            self.total_output += produced;
 
             switch (result) {
                 raw.BROTLI_DECODER_RESULT_SUCCESS => {
@@ -316,6 +360,12 @@ pub const Decoder = struct {
                 else => return error.DecompressionFailed,
             }
         }
+    }
+
+    /// Validate EOF after incremental updates.
+    pub fn finish(self: *Decoder) !void {
+        if (self.failed) return error.InvalidState;
+        if (!self.isFinished()) return error.TruncatedInput;
     }
 
     /// Reads compressed bytes from `reader`, decodes, and writes to `writer`.
@@ -345,25 +395,17 @@ pub const Decoder = struct {
 
 /// Compresses `src` into a freshly allocated brotli buffer.
 pub fn compress(allocator: std.mem.Allocator, src: []const u8, options: CompressOptions) ![]u8 {
-    const max_size = raw.BrotliEncoderMaxCompressedSize(src.len);
-    if (max_size == 0 and src.len != 0) return error.InputTooLarge;
-
-    const out = try allocator.alloc(u8, max_size);
-    errdefer allocator.free(out);
-
-    var encoded_size: usize = out.len;
-    const ok = raw.BrotliEncoderCompress(
-        options.quality,
-        options.window,
-        options.mode,
-        src.len,
-        if (src.len == 0) null else @ptrCast(src.ptr),
-        &encoded_size,
-        if (out.len == 0) null else @ptrCast(out.ptr),
-    );
-    if (ok == raw.BROTLI_FALSE) return error.CompressionFailed;
-
-    return shrinkOwnedSlice(allocator, out, encoded_size);
+    var encoder = try Encoder.init(allocator, .{
+        .quality = options.quality,
+        .window = options.window,
+        .mode = options.mode,
+    });
+    defer encoder.deinit();
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    encoder.update(src, &out.writer) catch |err| return if (err == error.WriteFailed) error.OutOfMemory else err;
+    encoder.finish(&out.writer) catch |err| return if (err == error.WriteFailed) error.OutOfMemory else err;
+    return out.toOwnedSlice();
 }
 
 /// Compresses `src` using default quality/window/mode.
@@ -375,19 +417,13 @@ pub fn compressDefault(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
 ///
 /// `max_output_size` must be a safe upper bound for the decoded data.
 pub fn decompress(allocator: std.mem.Allocator, src: []const u8, max_output_size: usize) ![]u8 {
-    const out = try allocator.alloc(u8, max_output_size);
-    errdefer allocator.free(out);
-
-    var decoded_size: usize = max_output_size;
-    const res = raw.BrotliDecoderDecompress(
-        src.len,
-        if (src.len == 0) null else @ptrCast(src.ptr),
-        &decoded_size,
-        if (out.len == 0) null else @ptrCast(out.ptr),
-    );
-
-    if (res != raw.BROTLI_DECODER_RESULT_SUCCESS) return error.DecompressionFailed;
-    return shrinkOwnedSlice(allocator, out, decoded_size);
+    var decoder = try Decoder.init(allocator, .{ .max_output_size = max_output_size });
+    defer decoder.deinit();
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var reader: std.Io.Reader = .fixed(src);
+    decoder.decodeReader(&reader, &out.writer) catch |err| return if (err == error.WriteFailed) error.OutOfMemory else err;
+    return out.toOwnedSlice();
 }
 
 /// Compresses all bytes from `reader` into `writer` using streaming brotli API.
@@ -424,7 +460,8 @@ pub fn decoderVersion() u32 {
     return raw.BrotliDecoderVersion();
 }
 
-/// Prepares an encoder dictionary and returns the owned prepared handle.
+/// Legacy raw dictionary handle using libc allocation; dictionary bytes are borrowed.
+/// Prefer PreparedDictionary for caller-allocator ownership.
 pub fn prepareEncoderDictionary(
     dict_type: raw.BrotliSharedDictionaryType,
     dictionary: []const u8,
@@ -479,12 +516,39 @@ fn toU32Checked(value: i32) !u32 {
     return @intCast(value);
 }
 
-fn shrinkOwnedSlice(allocator: std.mem.Allocator, buf: []u8, len: usize) ![]u8 {
-    if (len == buf.len) return buf;
-    if (allocator.resize(buf, len)) return buf[0..len];
-
-    const exact = try allocator.alloc(u8, len);
-    @memcpy(exact, buf[0..len]);
-    allocator.free(buf);
-    return exact;
+fn validateOptions(quality: i32, window: i32) !void {
+    if (quality < 0 or quality > 11 or window < 10 or window > 24)
+        return error.InvalidParameter;
 }
+
+/// Owned prepared raw-prefix dictionary. Do not copy; deinit after all encoders.
+pub const PreparedDictionary = struct {
+    memory: *Memory,
+    bytes: []u8,
+    handle: *raw.BrotliEncoderPreparedDictionary,
+
+    pub fn init(allocator: std.mem.Allocator, bytes: []const u8, quality: i32) !PreparedDictionary {
+        try validateOptions(quality, default_window);
+        const memory = try Memory.create(allocator);
+        errdefer memory.destroy();
+        const owned = try allocator.dupe(u8, bytes);
+        errdefer allocator.free(owned);
+        const handle = raw.BrotliEncoderPrepareDictionary(
+            raw.BROTLI_SHARED_DICTIONARY_RAW,
+            owned.len,
+            owned.ptr,
+            quality,
+            Memory.alloc,
+            Memory.free,
+            memory,
+        ) orelse return if (memory.failed) error.OutOfMemory else error.InvalidDictionary;
+        return .{ .memory = memory, .bytes = owned, .handle = handle };
+    }
+
+    pub fn deinit(self: *PreparedDictionary) void {
+        raw.BrotliEncoderDestroyPreparedDictionary(self.handle);
+        self.memory.allocator.free(self.bytes);
+        self.memory.destroy();
+        self.* = undefined;
+    }
+};

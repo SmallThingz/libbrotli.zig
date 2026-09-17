@@ -2,15 +2,11 @@
     .name = .libbrotli,
     .version = "0.0.0",
     .fingerprint = 0x84664732357cb225,
-    .minimum_zig_version = "0.16.0-dev.2984+cb7d2b056",
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .brotli_upstream = .{
             .url = "git+https://github.com/google/brotli#v1.2.0",
             .hash = "N-V-__8AAMNh8QMyXlG5iuyWDZmjiXB40JarUNu1a80peP7K",
-        },
-        .ziglibc = .{
-            .url = "git+https://github.com/SmallThingz/ziglibc#b6e1db3968cfc71f740c95b9308378137df4f0f0",
-            .hash = "N-V-__8AAAdgCgBOOTMNno4yXYcXyIVt9jp8J6OFyJ3UP-sL",
         },
     },
     .paths = .{

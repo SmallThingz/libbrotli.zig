@@ -2,7 +2,7 @@ const std = @import("std");
 
 const brotli_version = std.SemanticVersion{
     .major = 1,
-    .minor = 1,
+    .minor = 2,
     .patch = 0,
 };
 
@@ -54,7 +54,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const shared = b.option(bool, "shared", "Build libbrotli as a shared library") orelse false;
-    const static_libc = b.option(bool, "static_libc", "Link against static ziglibc instead of system libc") orelse true;
 
     const brotli_upstream = b.dependency("brotli_upstream", .{});
 
@@ -65,23 +64,11 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
-            .link_libc = !static_libc,
+            .link_libc = true,
             .sanitize_c = .off,
         }),
     });
-    configureBrotliLibrary(lib.root_module, brotli_upstream);
-
-    const ziglibc_dep = if (static_libc) b.dependency("ziglibc", .{
-        .target = target,
-        .optimize = optimize,
-        .trace = false,
-    }) else null;
-
-    const static_libc_artifact = if (ziglibc_dep) |dep| blk: {
-        const ziglibc_lib = findDependencyArtifactByLinkage(dep, "cguana", .static);
-        configureStaticLibc(lib.root_module, ziglibc_lib, dep);
-        break :blk ziglibc_lib;
-    } else null;
+    configureBrotliLibrary(b, lib.root_module, brotli_upstream);
 
     b.installArtifact(lib);
 
@@ -89,44 +76,39 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/brotli.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = !static_libc,
+        .link_libc = true,
     });
     mod.addIncludePath(brotli_upstream.path("c/include"));
     mod.addIncludePath(brotli_upstream.path("c"));
     mod.linkLibrary(lib);
-    if (static_libc_artifact) |artifact| {
-        configureStaticLibc(mod, artifact, ziglibc_dep.?);
-    }
 
     const tests = b.addTest(.{
+        .use_lld = target.result.ofmt != .macho,
+        .use_llvm = true,
         .root_module = b.addModule("libbrotli_tests", .{
             .root_source_file = b.path("test/main.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libc = !static_libc,
+            .link_libc = true,
         }),
     });
     tests.root_module.addImport("libbrotli", mod);
-    if (static_libc_artifact) |artifact| {
-        configureStaticLibc(tests.root_module, artifact, ziglibc_dep.?);
-    }
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&run_tests.step);
 
     const example = b.addExecutable(.{
+        .use_lld = target.result.ofmt != .macho,
+        .use_llvm = true,
         .name = "brotli-roundtrip",
         .root_module = b.createModule(.{
             .root_source_file = b.path("examples/brotli_roundtrip.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libc = !static_libc,
+            .link_libc = true,
         }),
     });
     example.root_module.addImport("libbrotli", mod);
-    if (static_libc_artifact) |artifact| {
-        configureStaticLibc(example.root_module, artifact, ziglibc_dep.?);
-    }
     b.installArtifact(example);
 
     const run_example = b.addRunArtifact(example);
@@ -139,8 +121,10 @@ pub fn build(b: *std.Build) void {
     check.dependOn(&example.step);
 }
 
-fn configureBrotliLibrary(module: *std.Build.Module, dep: *std.Build.Dependency) void {
-    module.addIncludePath(.{ .cwd_relative = "include" });
+fn configureBrotliLibrary(b: *std.Build, module: *std.Build.Module, dep: *std.Build.Dependency) void {
+    module.addIncludePath(b.path("include"));
+    // Library allocation failures must return errors, never terminate the process.
+    module.addCMacro("BROTLI_ENCODER_CLEANUP_ON_OOM", "1");
     module.addIncludePath(dep.path("c/include"));
     module.addIncludePath(dep.path("c"));
 
@@ -159,38 +143,4 @@ fn configureBrotliLibrary(module: *std.Build.Module, dep: *std.Build.Dependency)
         .files = &brotli_dec_sources,
         .flags = &.{"-std=c99"},
     });
-}
-
-fn configureStaticLibc(module: *std.Build.Module, artifact: *std.Build.Step.Compile, dep: *std.Build.Dependency) void {
-    module.addIncludePath(dep.path("inc/libc"));
-    module.addIncludePath(dep.path("inc/posix"));
-    module.addIncludePath(dep.path("inc/gnu"));
-    module.linkLibrary(artifact);
-}
-
-fn findDependencyArtifactByLinkage(
-    dep: *std.Build.Dependency,
-    name: []const u8,
-    linkage: std.builtin.LinkMode,
-) *std.Build.Step.Compile {
-    var found: ?*std.Build.Step.Compile = null;
-    for (dep.builder.install_tls.step.dependencies.items) |dep_step| {
-        const install_artifact = dep_step.cast(std.Build.Step.InstallArtifact) orelse continue;
-        if (!std.mem.eql(u8, install_artifact.artifact.name, name)) continue;
-        if (install_artifact.artifact.linkage != linkage) continue;
-
-        if (found != null) {
-            std.debug.panic(
-                "artifact '{s}' with linkage '{s}' is ambiguous in dependency",
-                .{ name, @tagName(linkage) },
-            );
-        }
-        found = install_artifact.artifact;
-    }
-
-    if (found) |artifact| return artifact;
-    std.debug.panic(
-        "unable to find artifact '{s}' with linkage '{s}' in dependency install graph",
-        .{ name, @tagName(linkage) },
-    );
 }
