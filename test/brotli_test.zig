@@ -122,6 +122,9 @@ test "stream limit and failed writer poison decoder or encoder" {
     var writer: std.Io.Writer = .fixed(&buffer);
     try encoder.update("payload", &writer);
     try std.testing.expectError(error.WriteFailed, encoder.finish(&writer));
+    try std.testing.expect(encoder.isFinished());
+    try std.testing.expectError(error.InvalidState, encoder.finish(&writer));
+    try std.testing.expectError(error.InvalidState, encoder.flush(&writer));
     try std.testing.expectError(error.InvalidState, encoder.update("retry", &writer));
 }
 

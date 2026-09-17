@@ -157,6 +157,7 @@ pub const Encoder = struct {
 
     /// Finalizes the stream and writes trailing bytes.
     pub fn finish(self: *Encoder, writer: *std.Io.Writer) !void {
+        if (self.failed) return error.InvalidState;
         while (!self.isFinished()) {
             try self.runOperation(&.{}, raw.BROTLI_OPERATION_FINISH, writer);
         }
