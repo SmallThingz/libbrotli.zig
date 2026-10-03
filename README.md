@@ -1,6 +1,6 @@
 # libbrotli.zig
 
-Brotli 1.2.0 for Zig 0.16.0. The native `std.Build` graph compiles the pinned
+Brotli 1.2.0 for Zig 0.17.0. The native `std.Build` graph compiles the pinned
 upstream C encoder, decoder, and shared-dictionary sources directly. No CMake,
 Make, downloaded binaries, or custom libc is needed.
 
@@ -51,7 +51,7 @@ raw attachment methods explicitly borrow dictionaries. The legacy
 
 ```sh
 zig build test example -j2
-zig build test -Doptimize=ReleaseSafe -j2
+zig build test -Doptimize=safe -j2
 zig build check -Dshared=true -j2
 zig build check -Dtarget=x86_64-linux-musl -j2
 ```
