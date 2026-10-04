@@ -2,7 +2,7 @@
     .name = .libbrotli,
     .version = "0.0.0",
     .fingerprint = 0x84664732357cb225,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .brotli_upstream = .{
             .url = "git+https://github.com/google/brotli#v1.2.0",

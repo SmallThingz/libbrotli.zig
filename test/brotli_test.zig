@@ -106,7 +106,7 @@ test "every truncated prefix is rejected by streaming decoder" {
 }
 
 test "stream limit and failed writer poison decoder or encoder" {
-    const encoded = try libbrotli.compressDefault(allocator, "a" ** 4096);
+    const encoded = try libbrotli.compressDefault(allocator, &@as([4096]u8, @splat('a')));
     defer allocator.free(encoded);
     var decoder = try libbrotli.Decoder.init(allocator, .{ .max_output_size = 9, .stream = .{ .out_buffer_size = 5 } });
     defer decoder.deinit();
@@ -156,7 +156,9 @@ test "invalid options clean up once and trailing bytes are rejected" {
 }
 
 fn dictionaryRoundtrip(a: std.mem.Allocator) !void {
-    var bytes = ("prefix dictionary vocabulary usable for this data " ** 4).*;
+    const phrase = "prefix dictionary vocabulary usable for this data ";
+    var bytes: [phrase.len * 4]u8 = undefined;
+    for (0..4) |i| @memcpy(bytes[i * phrase.len ..][0..phrase.len], phrase);
     var dictionary = try libbrotli.PreparedDictionary.init(a, &bytes, 5);
     defer dictionary.deinit();
     var encoder = try libbrotli.Encoder.init(a, .{ .quality = 5 });

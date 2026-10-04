@@ -1,4 +1,1 @@
-pub const c = @cImport({
-    @cInclude("brotli/encode.h");
-    @cInclude("brotli/decode.h");
-});
+pub const c = @import("brotli_c");
